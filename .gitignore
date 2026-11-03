@@ -1,0 +1,23 @@
+
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables and secrets
+.env
+.streamlit/secrets.toml
+
+# Generated road network data
+road_network/*.graphml
+
+# IDE files
+.vscode/
+
+# System files
+.DS_Store
+Thumbs.db
