@@ -12,8 +12,6 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 
-# Generated road network data
-road_network/*.graphml
 
 # IDE files
 .vscode/
