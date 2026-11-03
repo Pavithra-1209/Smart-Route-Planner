@@ -8,16 +8,15 @@ def get_edge_distance(G, u, v):
     edge_data = G.get_edge_data(u, v)
 
     if G.is_multigraph():
-        return min(data["length"] for data in edge_data.values())
+        return min(
+            data["length"]
+            for data in edge_data.values()
+        )
 
     return edge_data["length"]
 
 
 def heuristic(G, node, destination):
-    """
-    Calculate straight-line geographical distance
-    using the Haversine formula.
-    """
 
     lat1 = math.radians(G.nodes[node]["y"])
     lon1 = math.radians(G.nodes[node]["x"])
@@ -37,7 +36,7 @@ def heuristic(G, node, destination):
 
     a = min(1.0, max(0.0, a))
 
-    earth_radius = 6371000  # meters
+    earth_radius = 6371000
 
     distance = 2 * earth_radius * math.atan2(
         math.sqrt(a),
@@ -49,27 +48,37 @@ def heuristic(G, node, destination):
 
 def astar(G, source, destination):
 
-    # Actual distance from source to each node
     g_score = {source: 0.0}
 
     parent = {source: None}
 
-    # Priority queue: (f_score, g_score, node)
     pq = [
-        (heuristic(G, source, destination), 0.0, source)
+        (
+            heuristic(G, source, destination),
+            0.0,
+            source
+        )
     ]
 
     explored_nodes = 0
+
+    # Store the exploration sequence
+    explored_order = []
 
     while pq:
 
         f_score, current_g, current_node = heapq.heappop(pq)
 
-        # Ignore outdated entries
-        if current_g > g_score.get(current_node, math.inf):
+        # Ignore outdated queue entries
+        if current_g > g_score.get(
+            current_node, math.inf
+        ):
             continue
 
         explored_nodes += 1
+
+        # Record explored node
+        explored_order.append(current_node)
 
         # Destination reached
         if current_node == destination:
@@ -83,33 +92,51 @@ def astar(G, source, destination):
 
             tentative_g = current_g + edge_distance
 
-            if tentative_g < g_score.get(neighbor, math.inf):
+            if tentative_g < g_score.get(
+                neighbor, math.inf
+            ):
 
                 g_score[neighbor] = tentative_g
+
                 parent[neighbor] = current_node
 
                 h_score = heuristic(
                     G, neighbor, destination
                 )
 
-                new_f_score = tentative_g + h_score
+                f_score = tentative_g + h_score
 
                 heapq.heappush(
                     pq,
-                    (new_f_score, tentative_g, neighbor)
+                    (f_score, tentative_g, neighbor)
                 )
 
+    # Destination not reachable
     if destination not in g_score:
-        return None, math.inf, explored_nodes
 
-    # Reconstruct route
+        return (
+            None,
+            math.inf,
+            explored_nodes,
+            explored_order
+        )
+
+    # Reconstruct shortest path
     path = []
+
     node = destination
 
     while node is not None:
+
         path.append(node)
+
         node = parent[node]
 
     path.reverse()
 
-    return path, g_score[destination], explored_nodes
+    return (
+        path,
+        g_score[destination],
+        explored_nodes,
+        explored_order
+    )

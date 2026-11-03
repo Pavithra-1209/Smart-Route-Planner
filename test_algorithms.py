@@ -56,9 +56,11 @@ print("\nRunning Dijkstra...")
 
 start = time.perf_counter()
 
-dijkstra_path, dijkstra_distance, dijkstra_explored = (
+dijkstra_path, dijkstra_distance, dijkstra_explored, dijkstra_order = (
     dijkstra(G, source_node, destination_node)
 )
+
+
 
 dijkstra_time = (time.perf_counter() - start) * 1000
 
@@ -68,7 +70,7 @@ print("Running A*...")
 
 start = time.perf_counter()
 
-astar_path, astar_distance, astar_explored = (
+astar_path, astar_distance, astar_explored, astar_order = (
     astar(G, source_node, destination_node)
 )
 
