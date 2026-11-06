@@ -10,6 +10,11 @@ from streamlit_folium import st_folium
 
 from algorithms.astar import astar
 from algorithms.dijkstra import dijkstra
+from algorithms.alternative_routes import (
+    build_simple_weighted_graph,
+    find_alternative_routes,
+)
+from algorithms.multi_stop import find_multi_stop_route
 
 
 # =====================================================
@@ -205,10 +210,28 @@ def load_graph():
     return ox.load_graphml(filepath=GRAPH_FILE)
 
 
+@st.cache_resource(show_spinner=False)
+def load_alternative_graph():
+    """Build and cache a simple weighted graph for K-shortest paths."""
+    return build_simple_weighted_graph(load_graph())
+
+
 @st.cache_data(show_spinner=False)
 def geocode_location(location):
     """Geocode a place name and cache the returned coordinates."""
     return ox.geocode(location)
+
+
+@st.cache_data(show_spinner=False)
+def get_graph_bounds():
+    """Return cached latitude/longitude bounds for the saved road graph."""
+    graph = load_graph()
+    if graph.number_of_nodes() == 0:
+        raise ValueError("The downloaded road network contains no nodes.")
+
+    latitudes = [float(data["y"]) for _, data in graph.nodes(data=True)]
+    longitudes = [float(data["x"]) for _, data in graph.nodes(data=True)]
+    return min(latitudes), max(latitudes), min(longitudes), max(longitudes)
 
 
 # =====================================================
@@ -499,12 +522,14 @@ if result:
     else:
         st.caption("Both algorithms explored the same number of nodes.")
 
-    # Four application sections.
-    route_tab, search_tab, performance_tab, details_tab = st.tabs([
-    "🗺️ Route Map",
-    "🔍 Search Visualization",
-    "📈 Performance Analysis",
-    "📋 Route Details"
+    # Application sections.
+    route_tab, alternative_tab, multi_stop_tab, search_tab, performance_tab, details_tab = st.tabs([
+        "🗺️ Route Map",
+        "🛣️ Alternative Routes",
+        "📍 Multi-Stop Planner",
+        "🔍 Search Visualization",
+        "📈 Performance Analysis",
+        "📋 Route Details",
     ])
     
     # =================================================
@@ -927,7 +952,497 @@ if result:
         )
 
     # =================================================
-    # 14. PERFORMANCE ANALYSIS
+    # 14. ALTERNATIVE ROUTE FINDER
+    # =================================================
+
+    with alternative_tab:
+        st.markdown("### 🛣️ Alternative Route Finder")
+        st.write(
+            "Generate up to three routes that are both short and use "
+            "different road segments."
+        )
+        st.caption(
+            "For faster results, the planner runs a small number of "
+            "bidirectional shortest-path searches. It penalizes roads already "
+            "used by selected routes, prefers alternatives with no more than "
+            "80% shared road segments, and keeps routes within 1.5 times the "
+            "shortest-route distance. If the road network does not contain "
+            "enough sufficiently different routes, fewer routes will be shown."
+        )
+
+        alternative_key = (
+            f"{result['source_node']}_{result['destination_node']}"
+        )
+
+        # Discard alternatives from a previous source-destination pair.
+        if st.session_state.get("alternative_routes_key") != alternative_key:
+            st.session_state["alternative_routes_key"] = alternative_key
+            st.session_state["alternative_routes"] = None
+
+        if st.button(
+            "🧭 Generate Alternative Routes",
+            type="primary",
+            use_container_width=True,
+            key=f"generate_alternatives_{alternative_key}",
+        ):
+            try:
+                with st.spinner(
+                    "Searching for a few distinct routes..."
+                ):
+                    alternative_graph = load_alternative_graph()
+                    alternatives = find_alternative_routes(
+                        alternative_graph,
+                        result["source_node"],
+                        result["destination_node"],
+                        k=3,
+                        max_overlap=0.80,
+                        max_distance_ratio=1.50,
+                        penalty_levels=(1.8, 2.5, 4.0, 7.0),
+                    )
+
+                st.session_state["alternative_routes"] = alternatives
+            except Exception as exc:
+                st.session_state["alternative_routes"] = None
+                st.error(f"Could not generate alternative routes: {exc}")
+
+        alternatives = st.session_state.get("alternative_routes")
+
+        if alternatives is None:
+            st.info(
+                "Click **Generate Alternative Routes** to calculate up to "
+                "three routes for this journey."
+            )
+        elif not alternatives:
+            st.warning("No route was found for this source and destination.")
+        else:
+            st.markdown("#### Route Comparison")
+            shortest_distance = alternatives[0]["distance"]
+            route_names = [
+                "Shortest Route" if index == 0 else f"Alternative {index}"
+                for index in range(len(alternatives))
+            ]
+
+            comparison_rows = []
+            for index, route in enumerate(alternatives):
+                comparison_rows.append(
+                    {
+                        "Route": route_names[index],
+                        "Distance (km)": round(route["distance"] / 1000, 3),
+                        "Extra Distance (km)": round(
+                            (route["distance"] - shortest_distance) / 1000, 3
+                        ),
+                        "Path Nodes": len(route["path"]),
+                        "Max Shared Roads (%)": (
+                            "—" if index == 0
+                            else round(route.get("max_shared_ratio", 0.0) * 100, 1)
+                        ),
+                    }
+                )
+
+            st.dataframe(
+                comparison_rows,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            if len(alternatives) == 1:
+                st.info(
+                    "Only one route met the diversity and distance limits. "
+                    "The road network may not contain another sufficiently "
+                    "different route for this journey."
+                )
+            else:
+                st.success(
+                    f"Found {len(alternatives)} routes with limited road "
+                    "overlap, ranked by total road distance."
+                )
+
+            # Draw every available route so the user can compare them visually.
+            graph = load_graph()
+            route_colors = ["#2563EB", "#DC2626", "#059669"]
+            route_dash_patterns = [None, "10, 8", "2, 8"]
+
+            source_point = [result["source_lat"], result["source_lon"]]
+            destination_point = [
+                result["destination_lat"],
+                result["destination_lon"],
+            ]
+
+            alternative_map = folium.Map(
+                location=[
+                    (source_point[0] + destination_point[0]) / 2,
+                    (source_point[1] + destination_point[1]) / 2,
+                ],
+                zoom_start=9,
+                control_scale=True,
+                prefer_canvas=True,
+            )
+
+            all_coordinates = [tuple(source_point), tuple(destination_point)]
+
+            for index, route in enumerate(alternatives):
+                route_coordinates = [
+                    (graph.nodes[node]["y"], graph.nodes[node]["x"])
+                    for node in route["path"]
+                ]
+                all_coordinates.extend(route_coordinates)
+
+                route_layer = folium.FeatureGroup(
+                    name=(
+                        f"{route_names[index]} "
+                        f"({route['distance'] / 1000:.2f} km)"
+                    ),
+                    show=True,
+                )
+
+                line_options = {
+                    "locations": route_coordinates,
+                    "color": route_colors[index % len(route_colors)],
+                    "weight": 6 if index == 0 else 5,
+                    "opacity": 0.9,
+                    "tooltip": (
+                        f"{route_names[index]} — "
+                        f"{route['distance'] / 1000:.3f} km"
+                    ),
+                }
+                dash_pattern = route_dash_patterns[
+                    index % len(route_dash_patterns)
+                ]
+                if dash_pattern:
+                    line_options["dash_array"] = dash_pattern
+
+                folium.PolyLine(**line_options).add_to(route_layer)
+                route_layer.add_to(alternative_map)
+
+            folium.Marker(
+                location=source_point,
+                popup=f"Source: {result['source_display']}",
+                tooltip="START LOCATION",
+                icon=folium.Icon(color="green", icon="play"),
+            ).add_to(alternative_map)
+
+            folium.Marker(
+                location=destination_point,
+                popup=f"Destination: {result['destination_display']}",
+                tooltip="DESTINATION",
+                icon=folium.Icon(color="red", icon="flag"),
+            ).add_to(alternative_map)
+
+            south = min(point[0] for point in all_coordinates)
+            north = max(point[0] for point in all_coordinates)
+            west = min(point[1] for point in all_coordinates)
+            east = max(point[1] for point in all_coordinates)
+            alternative_map.fit_bounds([[south, west], [north, east]])
+            folium.LayerControl(collapsed=False).add_to(alternative_map)
+
+            st.markdown("#### Alternative Routes on the Map")
+            st_folium(
+                alternative_map,
+                width=1200,
+                height=600,
+                key=f"alternative_map_{alternative_key}",
+                returned_objects=[],
+            )
+            st.caption(
+                "Blue: shortest route · Red: alternative 1 · Green: alternative 2. "
+                "The shared-road percentage in the table is measured against "
+                "the most similar route already selected. Use the layer control "
+                "to show or hide routes."
+            )
+
+    # =================================================
+    # 15. MULTI-STOP ROUTE PLANNER
+    # =================================================
+
+    with multi_stop_tab:
+        st.markdown("### 📍 Multi-Stop Route Planner")
+        st.write(
+            "Choose intermediate places between your current source and "
+            "destination. The planner can automatically find the visiting "
+            "order with the smallest total road distance."
+        )
+        st.caption(
+            "Select up to five intermediate stops. Automatic optimization "
+            "checks every possible stop order using road-network distances "
+            "and then reconstructs the shortest path for each journey leg."
+        )
+
+        source_name = result["source_display"]
+        destination_name = result["destination_display"]
+        stop_options = [
+            name for name in LOCATION_OPTIONS
+            if name not in (source_name, destination_name)
+        ]
+
+        multi_stop_key = (
+            f"{result['source_node']}_{result['destination_node']}"
+        )
+        selected_stops = st.multiselect(
+            "Select intermediate stops (1–5)",
+            options=stop_options,
+            max_selections=5,
+            key=f"multi_stop_selection_{multi_stop_key}",
+            placeholder="Choose places to visit along the journey",
+        )
+
+        planning_mode = st.radio(
+            "Stop visiting order",
+            [
+                "Automatically optimize order",
+                "Keep my selected order",
+            ],
+            horizontal=True,
+            key=f"multi_stop_mode_{multi_stop_key}",
+            help=(
+                "Automatic mode finds the lowest-total-distance order. "
+                "Selected-order mode visits the stops in the order you chose."
+            ),
+        )
+        optimize_order = planning_mode == "Automatically optimize order"
+
+        request_key = "|".join(
+            [
+                str(result["source_node"]),
+                str(result["destination_node"]),
+                planning_mode,
+                *selected_stops,
+            ]
+        )
+
+        if st.button(
+            "🧭 Calculate Multi-Stop Route",
+            type="primary",
+            use_container_width=True,
+            key=f"calculate_multi_stop_{multi_stop_key}",
+        ):
+            if not selected_stops:
+                st.warning("Please select at least one intermediate stop.")
+                st.session_state["multi_stop_result"] = None
+                st.session_state["multi_stop_result_key"] = None
+            else:
+                try:
+                    graph = load_graph()
+                    min_lat, max_lat, min_lon, max_lon = get_graph_bounds()
+                    stop_details = []
+
+                    with st.spinner(
+                        "Finding road-network locations and optimizing the stop order..."
+                    ):
+                        for stop_name in selected_stops:
+                            latitude, longitude = geocode_location(
+                                LOCATION_OPTIONS[stop_name]
+                            )
+
+                            if not (
+                                min_lat <= latitude <= max_lat
+                                and min_lon <= longitude <= max_lon
+                            ):
+                                raise ValueError(
+                                    f"{stop_name} is outside the downloaded "
+                                    "Guntur–Vijayawada road-network coverage."
+                                )
+
+                            stop_node = ox.distance.nearest_nodes(
+                                graph, X=longitude, Y=latitude
+                            )
+                            stop_details.append(
+                                {
+                                    "name": stop_name,
+                                    "latitude": latitude,
+                                    "longitude": longitude,
+                                    "node": stop_node,
+                                }
+                            )
+
+                        weighted_graph = load_alternative_graph()
+                        multi_route = find_multi_stop_route(
+                            weighted_graph,
+                            result["source_node"],
+                            [item["node"] for item in stop_details],
+                            result["destination_node"],
+                            optimize_order=optimize_order,
+                            max_stops=5,
+                        )
+
+                    name_by_node = {
+                        item["node"]: item["name"] for item in stop_details
+                    }
+                    multi_route["ordered_stop_names"] = [
+                        name_by_node[node]
+                        for node in multi_route["ordered_stops"]
+                    ]
+                    multi_route["stop_details"] = stop_details
+                    multi_route["source_name"] = source_name
+                    multi_route["destination_name"] = destination_name
+                    multi_route["source_latitude"] = result["source_lat"]
+                    multi_route["source_longitude"] = result["source_lon"]
+                    multi_route["destination_latitude"] = result["destination_lat"]
+                    multi_route["destination_longitude"] = result["destination_lon"]
+
+                    st.session_state["multi_stop_result"] = multi_route
+                    st.session_state["multi_stop_result_key"] = request_key
+
+                except Exception as exc:
+                    st.session_state["multi_stop_result"] = None
+                    st.session_state["multi_stop_result_key"] = None
+                    st.error(f"Could not calculate the multi-stop route: {exc}")
+
+        multi_result = st.session_state.get("multi_stop_result")
+        stored_request_key = st.session_state.get("multi_stop_result_key")
+
+        if not selected_stops:
+            st.info("Select at least one intermediate stop to begin.")
+        elif multi_result is None or stored_request_key != request_key:
+            st.info(
+                "Choose your stops and planning order, then click "
+                "**Calculate Multi-Stop Route**."
+            )
+        else:
+            st.success(
+                "Multi-stop journey calculated successfully. "
+                + (
+                    f"Evaluated {multi_result['orders_evaluated']} possible stop orders."
+                    if multi_result["optimized"]
+                    else "Your selected stop order was preserved."
+                )
+            )
+
+            metric1, metric2, metric3 = st.columns(3)
+            metric1.metric(
+                "Total Journey Distance",
+                f"{multi_result['distance'] / 1000:.3f} km",
+            )
+            metric2.metric(
+                "Intermediate Stops",
+                str(len(multi_result["ordered_stops"])),
+            )
+            metric3.metric(
+                "Journey Legs",
+                str(len(multi_result["leg_distances"])),
+            )
+
+            ordered_names = [
+                multi_result["source_name"],
+                *multi_result["ordered_stop_names"],
+                multi_result["destination_name"],
+            ]
+            st.markdown("#### Recommended Visiting Order")
+            st.markdown(" → ".join(ordered_names))
+
+            leg_rows = []
+            for index, distance in enumerate(multi_result["leg_distances"]):
+                leg_rows.append(
+                    {
+                        "Leg": index + 1,
+                        "From": ordered_names[index],
+                        "To": ordered_names[index + 1],
+                        "Distance (km)": round(distance / 1000, 3),
+                        "Path Nodes": len(multi_result["leg_paths"][index]),
+                    }
+                )
+
+            st.markdown("#### Journey Leg Details")
+            st.dataframe(
+                leg_rows,
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # Render the combined route and number each intermediate stop.
+            graph = load_graph()
+            route_coordinates = [
+                (graph.nodes[node]["y"], graph.nodes[node]["x"])
+                for node in multi_result["path"]
+            ]
+            source_point = [
+                multi_result["source_latitude"],
+                multi_result["source_longitude"],
+            ]
+            destination_point = [
+                multi_result["destination_latitude"],
+                multi_result["destination_longitude"],
+            ]
+
+            multi_map = folium.Map(
+                location=[
+                    (source_point[0] + destination_point[0]) / 2,
+                    (source_point[1] + destination_point[1]) / 2,
+                ],
+                zoom_start=9,
+                control_scale=True,
+                prefer_canvas=True,
+            )
+
+            folium.PolyLine(
+                locations=route_coordinates,
+                color="#7C3AED",
+                weight=6,
+                opacity=0.9,
+                tooltip=(
+                    f"Multi-stop route — "
+                    f"{multi_result['distance'] / 1000:.3f} km"
+                ),
+            ).add_to(multi_map)
+
+            folium.Marker(
+                location=source_point,
+                popup=f"Start: {multi_result['source_name']}",
+                tooltip="START",
+                icon=folium.Icon(color="green", icon="play"),
+            ).add_to(multi_map)
+
+            all_map_coordinates = list(route_coordinates)
+            all_map_coordinates.extend(
+                [tuple(source_point), tuple(destination_point)]
+            )
+
+            stop_details_by_node = {
+                item["node"]: item for item in multi_result["stop_details"]
+            }
+            for stop_index, stop_node in enumerate(
+                multi_result["ordered_stops"], start=1
+            ):
+                stop_detail = stop_details_by_node[stop_node]
+                stop_point = [
+                    stop_detail["latitude"],
+                    stop_detail["longitude"],
+                ]
+                all_map_coordinates.append(tuple(stop_point))
+                folium.Marker(
+                    location=stop_point,
+                    popup=f"Stop {stop_index}: {stop_detail['name']}",
+                    tooltip=f"STOP {stop_index}: {stop_detail['name']}",
+                    icon=folium.Icon(color="blue", icon="flag"),
+                ).add_to(multi_map)
+
+            folium.Marker(
+                location=destination_point,
+                popup=f"Destination: {multi_result['destination_name']}",
+                tooltip="DESTINATION",
+                icon=folium.Icon(color="red", icon="flag"),
+            ).add_to(multi_map)
+
+            south = min(point[0] for point in all_map_coordinates)
+            north = max(point[0] for point in all_map_coordinates)
+            west = min(point[1] for point in all_map_coordinates)
+            east = max(point[1] for point in all_map_coordinates)
+            multi_map.fit_bounds([[south, west], [north, east]])
+
+            st.markdown("#### Multi-Stop Route Map")
+            st_folium(
+                multi_map,
+                width=1200,
+                height=600,
+                key=f"multi_stop_map_{multi_stop_key}_{abs(hash(request_key))}",
+                returned_objects=[],
+            )
+            st.caption(
+                "Green: starting location · Blue: numbered intermediate stops · "
+                "Red: final destination · Purple: complete road route."
+            )
+
+    # =================================================
+    # 16. PERFORMANCE ANALYSIS
     # =================================================
 
     with performance_tab:
